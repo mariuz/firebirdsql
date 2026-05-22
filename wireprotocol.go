@@ -1404,38 +1404,6 @@ func (p *wireProtocol) opPutSegment(blobHandle int32, seg_data []byte) error {
 	return err
 }
 
-// opBatchSegments sends multiple BLOB segments in a single op_batch_segments packet.
-// Each segment is prefixed with a 2-byte little-endian length. This reduces round trips
-// from N (one per segment) to 1 for large BLOBs.
-func (p *wireProtocol) opBatchSegments(blobHandle int32, value []byte) error {
-	p.debugPrint("opBatchSegments")
-	// Build batch buffer: [len_lo][len_hi][data...] for each segment
-	numSegs := (len(value) + BLOB_SEGMENT_SIZE - 1) / BLOB_SEGMENT_SIZE
-	batch := make([]byte, 0, len(value)+numSegs*2)
-	for i := 0; i < len(value); i += BLOB_SEGMENT_SIZE {
-		end := i + BLOB_SEGMENT_SIZE
-		if end > len(value) {
-			end = len(value)
-		}
-		seg := value[i:end]
-		ln := len(seg)
-		batch = append(batch, byte(ln&255), byte(ln>>8))
-		batch = append(batch, seg...)
-	}
-	totalLen := len(batch)
-	p.packInt(op_batch_segments)
-	p.packInt(blobHandle)
-	p.packInt(int32(totalLen))
-	p.packInt(int32(totalLen))
-	p.appendBytes(batch)
-	pad_length := (4 - totalLen) & 3
-	if pad_length > 0 {
-		p.appendBytes(make([]byte, pad_length))
-	}
-	_, err := p.sendPackets()
-	return err
-}
-
 func (p *wireProtocol) opCloseBlob(blobHandle int32) error {
 	p.debugPrint("opCloseBlob")
 	p.packInt(op_close_blob)
@@ -1522,9 +1490,12 @@ func (p *wireProtocol) createBlob(value []byte, transHandle int32) ([]byte, erro
 		return blobId, err
 	}
 
-	// Send all segments in a single op_batch_segments packet to minimize round trips.
-	if len(value) > 0 {
-		if err = p.opBatchSegments(blobHandle, value); err != nil {
+	for i := 0; i < len(value); i += BLOB_SEGMENT_SIZE {
+		end := i + BLOB_SEGMENT_SIZE
+		if end > len(value) {
+			end = len(value)
+		}
+		if err = p.opPutSegment(blobHandle, value[i:end]); err != nil {
 			p.resumeBuffer(buf)
 			return blobId, err
 		}
