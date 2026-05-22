@@ -593,7 +593,7 @@ func TestDecFloat(t *testing.T) {
 		df34v, _ := df34.Value()
 
 		if df16v != f || df34v != f {
-			fmt.Printf("Error decfloat value : %v,%v,%v\n", df16v, df34v, f)
+			t.Errorf("Error decfloat value : %v,%v,%v", df16v, df34v, f)
 		}
 	}
 

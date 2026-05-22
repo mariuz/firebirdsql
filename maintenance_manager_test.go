@@ -70,28 +70,6 @@ func getFirebirdLog(t *testing.T) string {
 	return log
 }
 
-func grabStringOutput(run func() error, resChan chan string) (string, error) {
-	done := make(chan bool)
-	var result string
-	var err error
-
-	go func() {
-		err = run()
-		done <- true
-	}()
-
-	for loop, s := true, ""; loop; {
-		select {
-		case <-done:
-			loop = false
-			break
-		case s = <-resChan:
-			result += s + "\n"
-		}
-	}
-	return result, err
-}
-
 func TestServiceManager_Sweep(t *testing.T) {
 	if get_firebird_major_version(t) < 3 {
 		t.Skip("skip for 2.5, because it running in container")
@@ -107,7 +85,7 @@ func TestServiceManager_Sweep(t *testing.T) {
 	err = m.Sweep(db)
 	assert.NoError(t, err)
 	log := getFirebirdLog(t)
-	fmt.Println(log)
+	t.Log(log)
 	assert.Contains(t, log, `Sweep is started by SYSDBA
 Database xxxxx
 OIT xxx, OAT xxx, OST xxx, Next xxx`)
