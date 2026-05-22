@@ -1384,7 +1384,7 @@ func (p *wireProtocol) opGetSegment(blobHandle int32) error {
 	p.debugPrint("opGetSegment")
 	p.packInt(op_get_segment)
 	p.packInt(blobHandle)
-	p.packInt(int32(BUFFER_LEN))
+	p.packInt(int32(BLOB_SEGMENT_SIZE))
 	p.packInt(0)
 	_, err := p.sendPackets()
 	return err
