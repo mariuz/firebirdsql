@@ -1404,18 +1404,34 @@ func (p *wireProtocol) opPutSegment(blobHandle int32, seg_data []byte) error {
 	return err
 }
 
-func (p *wireProtocol) opBatchSegments(blobHandle int32, seg_data []byte) error {
+// opBatchSegments sends multiple BLOB segments in a single op_batch_segments packet.
+// Each segment is prefixed with a 2-byte little-endian length. This reduces round trips
+// from N (one per segment) to 1 for large BLOBs.
+func (p *wireProtocol) opBatchSegments(blobHandle int32, value []byte) error {
 	p.debugPrint("opBatchSegments")
-	ln := len(seg_data)
+	// Build batch buffer: [len_lo][len_hi][data...] for each segment
+	numSegs := (len(value) + BLOB_SEGMENT_SIZE - 1) / BLOB_SEGMENT_SIZE
+	batch := make([]byte, 0, len(value)+numSegs*2)
+	for i := 0; i < len(value); i += BLOB_SEGMENT_SIZE {
+		end := i + BLOB_SEGMENT_SIZE
+		if end > len(value) {
+			end = len(value)
+		}
+		seg := value[i:end]
+		ln := len(seg)
+		batch = append(batch, byte(ln&255), byte(ln>>8))
+		batch = append(batch, seg...)
+	}
+	totalLen := len(batch)
 	p.packInt(op_batch_segments)
 	p.packInt(blobHandle)
-	p.packInt(int32(ln + 2))
-	p.packInt(int32(ln + 2))
-	pad_length := ((4 - (ln + 2)) & 3)
-	padding := make([]byte, pad_length)
-	p.packBytes([]byte{byte(ln & 255), byte(ln >> 8)}) // little endian int16
-	p.packBytes(seg_data)
-	p.packBytes(padding)
+	p.packInt(int32(totalLen))
+	p.packInt(int32(totalLen))
+	p.appendBytes(batch)
+	pad_length := (4 - totalLen) & 3
+	if pad_length > 0 {
+		p.appendBytes(make([]byte, pad_length))
+	}
 	_, err := p.sendPackets()
 	return err
 }
@@ -1506,25 +1522,21 @@ func (p *wireProtocol) createBlob(value []byte, transHandle int32) ([]byte, erro
 		return blobId, err
 	}
 
-	i := 0
-	for i < len(value) {
-		end := i + BLOB_SEGMENT_SIZE
-		if end > len(value) {
-			end = len(value)
+	// Send all segments in a single op_batch_segments packet to minimize round trips.
+	if len(value) > 0 {
+		if err = p.opBatchSegments(blobHandle, value); err != nil {
+			p.resumeBuffer(buf)
+			return blobId, err
 		}
-		p.opPutSegment(blobHandle, value[i:end])
-		_, _, _, err := p.opResponse()
+		_, _, _, err = p.opResponse()
 		if err != nil {
-			break
+			p.resumeBuffer(buf)
+			return blobId, err
 		}
-		i += BLOB_SEGMENT_SIZE
-	}
-	if err != nil {
-		p.resumeBuffer(buf)
-		return blobId, err
 	}
 
 	if err = p.opCloseBlob(blobHandle); err != nil {
+		p.resumeBuffer(buf)
 		return nil, err
 	}
 	_, _, _, err = p.opResponse()
