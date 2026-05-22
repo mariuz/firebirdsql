@@ -95,13 +95,26 @@ func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
 	}
 
 	if rows.currentChunkIdx >= len(rows.currentChunk) && rows.moreData {
-		// Get one chunk
-		err = rows.stmt.fc.wp.opFetch(rows.stmt.stmtHandle, rows.stmt.blr)
-		if err != nil {
-			return err
+		// Watch for context cancellation during the blocking network fetch.
+		var done chan struct{}
+		if rows.ctx.Done() != nil {
+			done = make(chan struct{}, 1)
+			go rows.stmt.sendOpCancel(rows.ctx, done)
 		}
-		rows.currentChunk, rows.moreData, err = rows.stmt.fc.wp.opFetchResponse(rows.stmt.stmtHandle, rows.stmt.fc.tx.transHandle, rows.stmt.resultXsqlda)
+
+		err = rows.stmt.fc.wp.opFetch(rows.stmt.stmtHandle, rows.stmt.blr)
+		if err == nil {
+			rows.currentChunk, rows.moreData, err = rows.stmt.fc.wp.opFetchResponse(rows.stmt.stmtHandle, rows.stmt.fc.tx.transHandle, rows.stmt.resultXsqlda)
+		}
+
+		if done != nil {
+			done <- struct{}{} // dismiss the watcher goroutine
+		}
+
 		if err != nil {
+			if cerr := rows.ctx.Err(); cerr != nil {
+				return cerr
+			}
 			return
 		}
 		rows.currentChunkIdx = 0

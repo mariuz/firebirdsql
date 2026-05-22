@@ -31,7 +31,6 @@ import (
 	"hash"
 	"math/big"
 
-	"modernc.org/mathutil"
 )
 
 const (
@@ -134,7 +133,7 @@ func getClientSeed() (keyA *big.Int, keya *big.Int, err error) {
 		keya = new(big.Int).SetBytes(b)
 	}
 
-	keyA = mathutil.ModPowBigInt(g, keya, prime)
+	keyA = new(big.Int).Exp(g, keya, prime)
 	return
 }
 
@@ -151,7 +150,7 @@ func getSalt() ([]byte, error) {
 func getVerifier(user string, password string, salt []byte) *big.Int {
 	prime, g, _ := getPrime()
 	x := getUserHash(salt, user, password)
-	return mathutil.ModPowBigInt(g, x, prime)
+	return new(big.Int).Exp(g, x, prime)
 }
 
 func getServerSeed(v *big.Int) (keyB *big.Int, keyb *big.Int, err error) {
@@ -161,7 +160,7 @@ func getServerSeed(v *big.Int) (keyB *big.Int, keyb *big.Int, err error) {
 		return
 	}
 	keyb = new(big.Int).SetBytes(b)
-	gb := mathutil.ModPowBigInt(g, keyb, prime)              // gb = pow(g, b, N)
+	gb := new(big.Int).Exp(g, keyb, prime)              // gb = pow(g, b, N)
 	kv := new(big.Int).Mod(new(big.Int).Mul(k, v), prime)    // kv = (k * v) % N
 	keyB = new(big.Int).Mod(new(big.Int).Add(kv, gb), prime) // B = (kv + gb) % N
 	return
@@ -171,12 +170,12 @@ func getClientSession(user string, password string, salt []byte, keyA *big.Int, 
 	prime, g, k := getPrime()
 	u := getScramble(keyA, keyB)
 	x := getUserHash(salt, user, password)
-	gx := mathutil.ModPowBigInt(g, x, prime)                     // gx = pow(g, x, N)
+	gx := new(big.Int).Exp(g, x, prime)                     // gx = pow(g, x, N)
 	kgx := new(big.Int).Mod(new(big.Int).Mul(k, gx), prime)      // kgx = (k * gx) % N
 	diff := new(big.Int).Mod(new(big.Int).Sub(keyB, kgx), prime) // diff = (B - kgx) % N
 	ux := new(big.Int).Mod(new(big.Int).Mul(u, x), prime)        // ux = (u * x) % N
 	aux := new(big.Int).Mod(new(big.Int).Add(keya, ux), prime)   // aux = (a + ux) % N
-	sessionSecret := mathutil.ModPowBigInt(diff, aux, prime)     // (B - kg^x) ^ (a + ux)
+	sessionSecret := new(big.Int).Exp(diff, aux, prime)     // (B - kg^x) ^ (a + ux)
 
 	return bigIntToSha1(sessionSecret)
 }
@@ -185,9 +184,9 @@ func getServerSession(user string, password string, salt []byte, keyA *big.Int, 
 	prime, _, _ := getPrime()
 	u := getScramble(keyA, keyB)
 	v := getVerifier(user, password, salt)
-	vu := mathutil.ModPowBigInt(v, u, prime)
+	vu := new(big.Int).Exp(v, u, prime)
 	avu := new(big.Int).Mod(new(big.Int).Mul(keyA, vu), prime)
-	sessionSecret := mathutil.ModPowBigInt(avu, keyb, prime)
+	sessionSecret := new(big.Int).Exp(avu, keyb, prime)
 	return bigIntToSha1(sessionSecret)
 }
 
@@ -198,7 +197,7 @@ func getClientProof(user string, password string, salt []byte, keyA *big.Int, ke
 
 	n1 := bytesToBigInt(bigIntToSha1(prime))
 	n2 := bytesToBigInt(bigIntToSha1(g))
-	n3 := mathutil.ModPowBigInt(n1, n2, prime)
+	n3 := new(big.Int).Exp(n1, n2, prime)
 	n4 := getStringHash(user)
 
 	var digest hash.Hash
