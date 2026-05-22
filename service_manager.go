@@ -361,32 +361,19 @@ func (svc *ServiceManager) WaitStrings(result chan string) error {
 
 func (svc *ServiceManager) WaitString() (string, error) {
 	part := make(chan string)
-	done := make(chan bool)
-	var err error
-	var result string
+	errCh := make(chan error, 1)
 
 	go func() {
-		err = svc.WaitStrings(part)
-		done <- true
+		errCh <- svc.WaitStrings(part)
+		close(part)
 	}()
 
-	var s string
-	for cont := true; cont; {
-		select {
-		case s = <-part:
-			result += s + "\n"
-		case <-done:
-			cont = false
-			break
-		default:
-		}
+	var result string
+	for s := range part {
+		result += s + "\n"
 	}
 
-	if err != nil {
-		return "", err
-	}
-
-	return result, nil
+	return result, <-errCh
 }
 
 func (svc *ServiceManager) GetString() (result string, end bool, err error) {
