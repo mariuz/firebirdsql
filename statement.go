@@ -26,6 +26,9 @@ package firebirdsql
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
+	"os"
+	"time"
 )
 
 type firebirdsqlStmt struct {
@@ -87,6 +90,19 @@ func (stmt *firebirdsqlStmt) sendOpCancel(ctx context.Context, done chan struct{
 	}
 }
 
+// cancelAndDrain is called when the OS-level connection deadline fires before
+// the server responded (a fallback for Go timer starvation on loaded machines).
+// It resets the connection deadline, sends op_cancel so the server cleans up,
+// reads the resulting error response, and returns it.
+func (stmt *firebirdsqlStmt) cancelAndDrain() error {
+	stmt.fc.wp.conn.SetDeadline(time.Time{}) // re-enable I/O
+	stmt.fc.wp.opCancel(fb_cancel_raise)
+	stmt.fc.wp.conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _, _, err := stmt.fc.wp.opResponse()
+	stmt.fc.wp.conn.SetDeadline(time.Time{})
+	return err
+}
+
 // ensureInputXsqlda fetches bind-parameter metadata on first execute with args.
 // It records the attempt by leaving inputXsqlda as a non-nil empty slice when the
 // server returns no metadata, so we don't re-issue the info request on every call.
@@ -125,12 +141,28 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 		return
 	}
 
+	// Set a fallback OS-level deadline slightly after the context deadline.
+	// This unblocks the read when Go's timer goroutine (sysmon) is starved by a
+	// CPU-bound Firebird query, while still giving the normal sendOpCancel goroutine
+	// enough time to fire first and receive a clean "operation was cancelled" from
+	// the server.
+	if dl, ok := ctx.Deadline(); ok {
+		stmt.fc.wp.conn.SetDeadline(dl.Add(3 * time.Second))
+		defer stmt.fc.wp.conn.SetDeadline(time.Time{})
+	}
+
 	var done = make(chan struct{}, 1)
 	go stmt.sendOpCancel(ctx, done)
 	_, _, _, err = stmt.fc.wp.opResponse()
 	done <- struct{}{}
 
 	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			// OS deadline fired (sysmon was starved). The read was cleanly
+			// interrupted before the server sent any data; send op_cancel now
+			// and read the server's cancellation acknowledgement.
+			err = stmt.cancelAndDrain()
+		}
 		return
 	}
 
@@ -200,10 +232,18 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
+		if dl, ok := ctx.Deadline(); ok {
+			stmt.fc.wp.conn.SetDeadline(dl.Add(3 * time.Second))
+			defer stmt.fc.wp.conn.SetDeadline(time.Time{})
+		}
+
 		go stmt.sendOpCancel(ctx, done)
 		result, err = stmt.fc.wp.opSqlResponse(stmt.resultXsqlda)
 		done <- struct{}{}
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				err = stmt.cancelAndDrain()
+			}
 			return nil, err
 		}
 
@@ -219,11 +259,19 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
+		if dl, ok := ctx.Deadline(); ok {
+			stmt.fc.wp.conn.SetDeadline(dl.Add(3 * time.Second))
+			defer stmt.fc.wp.conn.SetDeadline(time.Time{})
+		}
+
 		go stmt.sendOpCancel(ctx, done)
 		_, _, _, err = stmt.fc.wp.opResponse()
 		done <- struct{}{}
 
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				err = stmt.cancelAndDrain()
+			}
 			return nil, err
 		}
 

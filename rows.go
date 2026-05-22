@@ -29,6 +29,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"time"
 )
 
 type firebirdsqlRows struct {
@@ -75,6 +76,14 @@ func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
 	if rows.ctx.Err() != nil {
 		rows.stmt.fc.wp.opCancel(fb_cancel_raise)
 		return rows.ctx.Err()
+	}
+	// Fallback for timer-starved environments: check the wall clock directly
+	// against the context deadline. This catches the case where Go's sysmon
+	// is delayed by a CPU-bound Firebird query and ctx.Err() is still nil
+	// even though the deadline has passed.
+	if dl, ok := rows.ctx.Deadline(); ok && time.Now().After(dl) {
+		rows.stmt.fc.wp.opCancel(fb_cancel_raise)
+		return context.DeadlineExceeded
 	}
 
 	if rows.stmt.stmtType == isc_info_sql_stmt_exec_procedure {
