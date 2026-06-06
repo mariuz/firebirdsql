@@ -56,6 +56,39 @@ Windows database path:
 	db, err := sql.Open("firebirdsql", "sysdba:masterkey@localhost/C:/fbdata/mydb.fdb")
 
 See the README for the full list of optional query parameters (auth_plugin_name,
-charset, role, timezone, wire_crypt, wire_compress, column_name_to_lower).
+auth_plugin_list, charset, role, timezone, wire_crypt, wire_crypt_plugin,
+wire_compress, column_name_to_lower).
+
+Authentication is controlled by two parameters:
+
+	auth_plugin_name  preferred authentication plugin (default "Srp256"). Must be
+	                  a member of auth_plugin_list.
+	auth_plugin_list  ordered, comma-separated allow-list of acceptable auth
+	                  plugins (default "Srp256,Srp,Legacy_Auth"; must be a subset
+	                  of the supported plugins). The plugin the server selects must
+	                  be a member, otherwise the connection is refused before any
+	                  credentials are sent. Omit a plugin to refuse it — e.g.
+	                  "Srp256,Srp" rejects a server downgrade to Legacy_Auth, which
+	                  would otherwise put a brute-forceable DES crypt(password) hash
+	                  on the wire.
+
+Wire encryption is controlled by two parameters that mirror the Firebird server's
+own WireCrypt / WireCryptPlugin settings:
+
+	wire_crypt        disabled | enabled | required  (default enabled; false/true
+	                  are accepted as aliases for disabled/enabled). "enabled"
+	                  encrypts when the server offers an acceptable cipher but
+	                  tolerates a plaintext channel; "required" fails the
+	                  connection closed on every non-encrypting handshake
+	                  outcome — including a legacy plain op_accept (protocol
+	                  versions <= 12) and an op_accept_data with no negotiated
+	                  cipher — and refuses before any credentials are sent.
+	wire_crypt_plugin ordered, comma-separated allow-list of acceptable ciphers
+	                  (default "ChaCha64,ChaCha,Arc4"). Order is client
+	                  preference; omit a cipher to refuse it — e.g.
+	                  "ChaCha64,ChaCha" rejects the weak RC4/Arc4 cipher.
+
+The negotiated cipher can be inspected via the WireCipher method on the driver
+connection (see firebirdsqlConn.WireCipher), reachable through sql.Conn.Raw.
 */
 package firebirdsql

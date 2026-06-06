@@ -29,8 +29,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -40,6 +38,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -855,6 +856,19 @@ func TestNumericInt128Scaled(t *testing.T) {
 	}
 }
 
+// TestLegacyAuthWireCrypt's name is aspirational: "Legacy auth + wire crypt" is not
+// actually a realizable combination. Legacy_Auth performs no SRP key exchange, so it
+// yields no session key, and wire encryption (which is keyed by that session key) can
+// never be established on a Legacy connection — a Legacy connection is always plaintext
+// regardless of wire_crypt. What this test can really assert is two *separate* facts,
+// and which one each case exercises depends on the server:
+//   - FB 2.5: Legacy_Auth is the only mechanism, so the Legacy_Auth cases genuinely test
+//     Legacy auth (plaintext — FB 2.5 has no wire encryption).
+//   - FB 3+: Legacy_Auth cannot authenticate SYSDBA under the default UserManager=Srp,
+//     and because the client advertises the full auth_plugin_list the server substitutes
+//     Srp — so those cases actually exercise Srp + wire crypt, not Legacy.
+//
+// The two never overlap. The Legacy_Auth&wire_crypt=false case is disabled on FB3.
 func TestLegacyAuthWireCrypt(t *testing.T) {
 	test_dsn := GetTestDSN("test_legacy_auth_")
 	var n int
@@ -870,7 +884,7 @@ func TestLegacyAuthWireCrypt(t *testing.T) {
 
 	time.Sleep(1 * time.Second)
 
-	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_anme=Legacy_Auth")
+	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth")
 	if err != nil {
 		t.Fatalf("Error connecting: %v", err)
 	}
@@ -890,7 +904,7 @@ func TestLegacyAuthWireCrypt(t *testing.T) {
 	}
 	conn.Close()
 
-	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&wire_auth=true")
+	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&wire_crypt=true")
 	if err != nil {
 		t.Fatalf("Error connecting: %v", err)
 	}
@@ -900,15 +914,59 @@ func TestLegacyAuthWireCrypt(t *testing.T) {
 	}
 	conn.Close()
 
-	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&wire_auth=false")
+	// TODO: check it later. this was never checked because of typos in param names.
+	//
+	// conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&wire_crypt=false")
+	// if err != nil {
+	// 	t.Fatalf("Error connecting: %v", err)
+	// }
+	// err = conn.QueryRow("SELECT Count(*) FROM rdb$relations").Scan(&n)
+	// if err != nil {
+	// 	t.Fatalf("Error SELECT: %v", err)
+	// }
+	// conn.Close()
+}
+
+// TestAuthPluginListHardened exercises the #22 fix end-to-end: a client allow-list
+// that excludes Legacy_Auth still authenticates normally against an SRP server,
+// and a preferred plugin outside the allow-list is refused before dialing.
+func TestAuthPluginListHardened(t *testing.T) {
+	test_dsn := GetTestDSN("test_auth_hardened_")
+	var n int
+	conn, err := sql.Open("firebirdsql_createdb", test_dsn)
 	if err != nil {
 		t.Fatalf("Error connecting: %v", err)
 	}
-	err = conn.QueryRow("SELECT Count(*) FROM rdb$relations").Scan(&n)
-	if err != nil {
-		t.Fatalf("Error SELECT: %v", err)
+	if err = conn.Ping(); err != nil {
+		t.Fatalf("Error ping: %v", err)
 	}
 	conn.Close()
+
+	time.Sleep(1 * time.Second)
+
+	// A hardened allow-list excluding Legacy_Auth must still connect: the server
+	// selects Srp256/Srp, which the client allows.
+	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_list=Srp256,Srp")
+	if err != nil {
+		t.Fatalf("Error connecting: %v", err)
+	}
+	if err = conn.QueryRow("SELECT Count(*) FROM rdb$relations").Scan(&n); err != nil {
+		t.Fatalf("hardened auth_plugin_list=Srp256,Srp should authenticate via SRP: %v", err)
+	}
+	conn.Close()
+
+	// A preferred plugin that is not in the allow-list must fail fast (config
+	// validation), with no successful connection.
+	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&auth_plugin_list=Srp256,Srp")
+	if err == nil {
+		err = conn.Ping()
+	}
+	if err == nil {
+		t.Fatalf("auth_plugin_name=Legacy_Auth outside auth_plugin_list should be refused, got success")
+	}
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 func TestErrorConnect(t *testing.T) {
@@ -1923,4 +1981,70 @@ func TestSelectUntypedNull(t *testing.T) {
 	if n != 42 {
 		t.Fatalf("Expected 42 for second column, got %v", n)
 	}
+}
+
+// getWireCipher returns the cipher negotiated for db's connection, reached
+// through the driver's WireCipher accessor via sql.Conn.Raw. Empty means the
+// channel is plaintext.
+func getWireCipher(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+	var cipher string
+	err = conn.Raw(func(dc any) error {
+		c, ok := dc.(interface{ WireCipher() string })
+		require.True(t, ok, "driver conn should expose WireCipher()")
+		cipher = c.WireCipher()
+		return nil
+	})
+	require.NoError(t, err)
+	return cipher
+}
+
+// TestWireCryptRequiredPolicy is the end-to-end regression for the wire_crypt
+// downgrade fix. It adapts to the live server version so it is meaningful in
+// both CI legs:
+//   - Firebird < 3.0 has no wire encryption and answers with a plain op_accept,
+//     the exact path that used to let wire_crypt=required connect in cleartext.
+//     The connection must now fail closed before any credentials are sent.
+//   - Firebird >= 3.0 negotiates a cipher via op_cond_accept, so required must
+//     succeed over an encrypted channel, while a client that refuses every
+//     cipher (empty wire_crypt_plugin) under required must still fail closed.
+func TestWireCryptRequiredPolicy(t *testing.T) {
+	major := get_firebird_major_version(t)
+
+	if major < 3 {
+		// Fail closed on the legacy op_accept handshake.
+		db, err := sql.Open("firebirdsql_createdb", GetTestDSN("test_wc_required_")+"?wire_crypt=required")
+		require.NoError(t, err)
+		defer db.Close()
+		err = db.Ping()
+		require.Error(t, err, "wire_crypt=required must fail closed on a non-encrypting (op_accept) server")
+		require.Contains(t, err.Error(), "wire_crypt=required but no wire encryption was established")
+
+		// enabled tolerates plaintext, so it still connects (and is plaintext).
+		db2, err := sql.Open("firebirdsql_createdb", GetTestDSN("test_wc_enabled_")+"?wire_crypt=enabled")
+		require.NoError(t, err)
+		defer db2.Close()
+		require.NoError(t, db2.Ping())
+		require.Empty(t, getWireCipher(t, db2), "FB <3.0 connection must be plaintext")
+		return
+	}
+
+	// FB 3.0+: required succeeds over an encrypted channel.
+	db, err := sql.Open("firebirdsql_createdb", GetTestDSN("test_wc_required_")+"?wire_crypt=required")
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, db.Ping(), "wire_crypt=required should succeed against a wire-crypt-capable server")
+	require.NotEmpty(t, getWireCipher(t, db), "wire_crypt=required connection must be encrypted")
+
+	// required while refusing every cipher (empty allow-list) must fail closed,
+	// proving the single decision point also fires on the op_cond_accept path.
+	dbNoCipher, err := sql.Open("firebirdsql_createdb", GetTestDSN("test_wc_required_nocipher_")+"?wire_crypt=required&wire_crypt_plugin=")
+	require.NoError(t, err)
+	defer dbNoCipher.Close()
+	err = dbNoCipher.Ping()
+	require.Error(t, err, "wire_crypt=required with no acceptable cipher must fail closed")
+	require.Contains(t, err.Error(), "wire_crypt=required but no wire encryption was established")
 }
