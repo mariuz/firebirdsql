@@ -1648,11 +1648,30 @@ func TestTimeoutExecContext(t *testing.T) {
 
 func TestReuseConnectionAfterTimeout(t *testing.T) {
 	testDsn := GetTestDSN("test_timeout_conn_reuse_")
-	conn, err := sql.Open("firebirdsql_createdb", testDsn)
+	setupConn, err := sql.Open("firebirdsql_createdb", testDsn)
 	require.NoError(t, err)
+	defer setupConn.Close()
+	_, err = setupConn.Exec("CREATE TABLE timeout_conn_reuse (id INTEGER NOT NULL PRIMARY KEY, v INTEGER NOT NULL)")
+	require.NoError(t, err)
+	_, err = setupConn.Exec("INSERT INTO timeout_conn_reuse (id, v) VALUES (1, 0)")
+	require.NoError(t, err)
+
+	lockConn, err := sql.Open("firebirdsql", testDsn)
+	require.NoError(t, err)
+	defer lockConn.Close()
+	lockTx, err := lockConn.Begin()
+	require.NoError(t, err)
+	defer lockTx.Rollback()
+	_, err = lockTx.Exec("UPDATE timeout_conn_reuse SET v = v + 1 WHERE id = 1")
+	require.NoError(t, err)
+
+	conn, err := sql.Open("firebirdsql", testDsn)
+	require.NoError(t, err)
+	defer conn.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err = conn.QueryContext(ctx, longQueryNonSelectable)
+	_, err = conn.ExecContext(ctx, "UPDATE timeout_conn_reuse SET v = v + 1 WHERE id = 1")
 	require.Error(t, err)
 
 	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
