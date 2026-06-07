@@ -27,6 +27,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 )
@@ -195,6 +196,9 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 			// and read the server's cancellation acknowledgement.
 			err = stmt.cancelAndDrain()
 		}
+		if ctx.Err() != nil {
+			return result, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
+		}
 		return
 	}
 
@@ -279,6 +283,9 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				err = stmt.cancelAndDrain()
 			}
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
+			}
 			return nil, err
 		}
 
@@ -299,6 +306,9 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				err = stmt.cancelAndDrain()
+			}
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
 			}
 			return nil, err
 		}
