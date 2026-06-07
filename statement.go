@@ -114,6 +114,16 @@ func (stmt *firebirdsqlStmt) withCancelWatcher(ctx context.Context, fn func() er
 	return err
 }
 
+func contextErrOrDeadlineExceeded(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 // enforceDeadline mirrors ctx's deadline onto the connection at the OS socket level
 // (ctx.Deadline()+3s) and returns a closure that clears it. It is the fallback that
 // enforces the context deadline when Go's sysmon timer is starved by a CPU-bound query
@@ -196,10 +206,13 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 			// and read the server's cancellation acknowledgement.
 			err = stmt.cancelAndDrain()
 		}
-		if ctx.Err() != nil {
+		if contextErrOrDeadlineExceeded(ctx) != nil {
 			return result, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
 		}
 		return
+	}
+	if cerr := contextErrOrDeadlineExceeded(ctx); cerr != nil {
+		return result, fmt.Errorf("%w: %w", cerr, driver.ErrBadConn)
 	}
 
 	err = stmt.fc.wp.opInfoSql(stmt.stmtHandle, []byte{isc_info_sql_records})
@@ -283,10 +296,13 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				err = stmt.cancelAndDrain()
 			}
-			if ctx.Err() != nil {
+			if contextErrOrDeadlineExceeded(ctx) != nil {
 				return nil, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
 			}
 			return nil, err
+		}
+		if cerr := contextErrOrDeadlineExceeded(ctx); cerr != nil {
+			return nil, fmt.Errorf("%w: %w", cerr, driver.ErrBadConn)
 		}
 
 		rows = newFirebirdsqlRows(ctx, stmt, result)
@@ -307,10 +323,13 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				err = stmt.cancelAndDrain()
 			}
-			if ctx.Err() != nil {
+			if contextErrOrDeadlineExceeded(ctx) != nil {
 				return nil, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
 			}
 			return nil, err
+		}
+		if cerr := contextErrOrDeadlineExceeded(ctx); cerr != nil {
+			return nil, fmt.Errorf("%w: %w", cerr, driver.ErrBadConn)
 		}
 
 		rows = newFirebirdsqlRows(ctx, stmt, nil)

@@ -632,9 +632,9 @@ func TestIssue136(t *testing.T) {
 
 	const (
 		rowCount      = 15
-		writeSpacing  = 400 * time.Millisecond
-		pollInterval  = 100 * time.Millisecond
-		visibilitySLA = 2 * time.Second
+		writeSpacing  = 150 * time.Millisecond
+		pollInterval  = 50 * time.Millisecond
+		visibilitySLA = 1200 * time.Millisecond
 	)
 
 	// Warm both pools so the first row isn't charged for cold-start handshake latency.

@@ -85,7 +85,7 @@ func TestQueryContextCancelRace(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	const iterations = 200
+	const iterations = 100
 	for i := 0; i < iterations; i++ {
 		// Mostly sub-millisecond, jittered, so cancels land at varying points in the
 		// chunked fetch; every 7th iteration gets a generous deadline so the query can

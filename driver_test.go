@@ -58,14 +58,19 @@ var (
 		end`
 
 	longQuerySelectable = `
-		execute block returns (i integer) as declare c integer = 0;
+		execute block returns (i integer) as declare c integer = 0; declare k integer = 0;
 		begin
 		i = 0;
 		while (c < ` + fmt.Sprint(longQueryIterations) + ` ) do
 			begin
 				c = c + 1;
-				i = c;
-				suspend;
+				k = k + 1;
+				if (k = 1000) then
+					begin
+						i = c;
+						suspend;
+						k = 0;
+					end
 			end
 		end`
 )
@@ -1126,7 +1131,7 @@ func TestGoIssue49(t *testing.T) {
 }
 
 func TestGoIssue53(t *testing.T) {
-	timeout := time.Second * 40
+	timeout := 30 * time.Second
 	test_dsn := GetTestDSN("test_issue53_")
 	conn, err := sql.Open("firebirdsql_createdb", test_dsn)
 	if err != nil {
@@ -1610,12 +1615,35 @@ func TestTimeoutQueryContextDuringExec(t *testing.T) {
 
 func TestTimeoutExecContext(t *testing.T) {
 	testDsn := GetTestDSN("test_timeout_exec_context_")
-	conn, err := sql.Open("firebirdsql_createdb", testDsn)
+	setupConn, err := sql.Open("firebirdsql_createdb", testDsn)
 	require.NoError(t, err)
+	defer setupConn.Close()
+	_, err = setupConn.Exec("CREATE TABLE timeout_exec_ctx (id INTEGER NOT NULL PRIMARY KEY, v INTEGER NOT NULL)")
+	require.NoError(t, err)
+	_, err = setupConn.Exec("INSERT INTO timeout_exec_ctx (id, v) VALUES (1, 0)")
+	require.NoError(t, err)
+
+	lockConn, err := sql.Open("firebirdsql", testDsn)
+	require.NoError(t, err)
+	defer lockConn.Close()
+	lockTx, err := lockConn.Begin()
+	require.NoError(t, err)
+	defer lockTx.Rollback()
+	_, err = lockTx.Exec("UPDATE timeout_exec_ctx SET v = v + 1 WHERE id = 1")
+	require.NoError(t, err)
+
+	conn, err := sql.Open("firebirdsql", testDsn)
+	require.NoError(t, err)
+	defer conn.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err = conn.ExecContext(ctx, longQueryNonSelectable)
+	start := time.Now()
+	_, err = conn.ExecContext(ctx, "UPDATE timeout_exec_ctx SET v = v + 1 WHERE id = 1")
+	elapsed := time.Since(start)
 	require.Error(t, err)
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+	require.Less(t, elapsed, 15*time.Second)
 }
 
 func TestReuseConnectionAfterTimeout(t *testing.T) {
