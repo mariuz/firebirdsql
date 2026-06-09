@@ -50,7 +50,9 @@ func (stmt *firebirdsqlStmt) freeStatement(mode int32) error {
 	if (stmt.fc.wp.acceptType & ptype_MASK) == ptype_lazy_send {
 		stmt.fc.wp.lazyResponseCount++
 	} else {
-		_, _, _, err = stmt.fc.wp.opResponse()
+		// Teardown read: bound it so a silent wire can't hang rows.Close()/stmt.Close()
+		// (reached automatically by database/sql's awaitDone on a mid-fetch ctx deadline).
+		_, _, _, err = stmt.fc.wp.opResponseTimeout(abandonReadTimeout)
 	}
 	if stmt.fc.tx.isAutocommit {
 		stmt.fc.tx.commitRetainging()
@@ -144,11 +146,9 @@ func (stmt *firebirdsqlStmt) enforceDeadline(ctx context.Context) func() {
 // It resets the connection deadline, sends op_cancel so the server cleans up,
 // reads the resulting error response, and returns it.
 func (stmt *firebirdsqlStmt) cancelAndDrain() error {
-	stmt.fc.wp.conn.SetDeadline(time.Time{}) // re-enable I/O
+	stmt.fc.wp.conn.SetDeadline(time.Time{}) // re-enable I/O before the op_cancel write
 	stmt.fc.wp.opCancel(fb_cancel_raise)
-	stmt.fc.wp.conn.SetDeadline(time.Now().Add(10 * time.Second))
-	_, _, _, err := stmt.fc.wp.opResponse()
-	stmt.fc.wp.conn.SetDeadline(time.Time{})
+	_, _, _, err := stmt.fc.wp.opResponseTimeout(abandonReadTimeout)
 	return err
 }
 
@@ -199,6 +199,10 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 		return e
 	})
 
+	// Deadline-abandon disposition: drain the cancel ack if the OS deadline fired, then evict
+	// (ErrBadConn) if the ctx deadline has passed. This block is repeated verbatim at the other
+	// three blocking-read sites (exec's opInfoSql read; query's exec_procedure and select reads) —
+	// keep all four in sync.
 	if err != nil {
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			// OS deadline fired (sysmon was starved). The read was cleanly
@@ -222,6 +226,15 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 
 	_, _, buf, err := stmt.fc.wp.opResponse()
 	if err != nil {
+		// Mirror the 1st-read defense (above): this opInfoSql records read is bounded by the
+		// still-armed enforceDeadline, so it cannot hang, but on a ctx-deadline abandon the
+		// wire is desynced — cancel/drain and evict rather than pool the poisoned conn.
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			err = stmt.cancelAndDrain()
+		}
+		if contextErrOrDeadlineExceeded(ctx) != nil {
+			return result, fmt.Errorf("%w: %w", err, driver.ErrBadConn)
+		}
 		return
 	}
 
